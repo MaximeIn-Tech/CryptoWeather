@@ -49,15 +49,16 @@ print(f"ETH ATH is: {ETH_ATH}")
 # Function to broadcast message to all users
 async def broadcast_to_users(message):
     subscribers = load_subscribers()
-    try:
-        await bot.send_message(
-            chat_id=1355080202,
-            text=message,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-    except TelegramError as e:
-        logging.error(f"Error sending message to chat {1355080202}: {e}")
+    for chat_id in subscribers:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except TelegramError as e:
+            logging.error(f"Error sending message to chat {1355080202}: {e}")
 
 
 # Function to handle BTC WebSocket messages
