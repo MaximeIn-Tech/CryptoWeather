@@ -35,7 +35,7 @@ The bot will also display a message when a new ATH is reached for BTC or ETH. Th
 
 ![alt text](ressources/images/ATH.png)
 
-This feature is using a websocket connection _(Binance websocket)_ to monitor the price at all times
+This feature is using a websocket connection _(Binance websocket)_ to monitor the price at all times. The websocket is being rechecked every hour to avoid being disconnected.
 
 In order to prevent spamming users, the module that handles the ATH alerts has a `time.sleep(10)` snippet to act as a buffer.
 
