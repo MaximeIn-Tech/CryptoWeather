@@ -4,49 +4,55 @@ import logging
 import os
 import ssl
 import time
+from datetime import datetime, timedelta
 
 import websocket
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.error import TelegramError
 
-from main import *
+from main import load_subscribers
 
 load_dotenv()
 
-# set higher logging level for httpx to avoid all GET and POST requests being logged
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define your token here
-token = os.getenv("TOKEN_BOT")
-
 # Initialize the Telegram Bot
+token = os.getenv("TOKEN_BOT")
 bot = Bot(token=token)
 
+# Constants
+COOLDOWN_PERIOD = 10  # In seconds
+PERCENTAGE_THRESHOLD = 0.1  # 0.1% increase for new ATH notification
+TWAP_WINDOW = 300  # 5 minutes for TWAP calculation
+MAX_NOTIFICATIONS_PER_HOUR = 3
 
-# Load ATH values from JSON file
+# Global variables
+ath_values = {}
+last_notification_time = {"BTCUSDT": datetime.min, "ETHUSDT": datetime.min}
+price_history = {"BTCUSDT": [], "ETHUSDT": []}
+notification_count = {"BTCUSDT": 0, "ETHUSDT": 0}
+notification_reset_time = {"BTCUSDT": datetime.now(), "ETHUSDT": datetime.now()}
+
+
 def load_ath_values():
-    with open("ath_values.json", "r") as file:
-        return json.load(file)
+    try:
+        with open("ath_values.json", "r") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {"BTCUSDT": 0, "ETHUSDT": 0}
 
 
-# Save ATH values to JSON file
 def save_ath_values(ath_values):
     with open("ath_values.json", "w") as file:
         json.dump(ath_values, file)
 
 
-# Load initial ATH values
 ath_values = load_ath_values()
-BTC_ATH = ath_values.get("BTC")
-print(f"BTC ATH is: {BTC_ATH}")
-ETH_ATH = ath_values.get("ETH")
-print(f"ETH ATH is: {ETH_ATH}")
 
 
-# Function to broadcast message to all users
 async def broadcast_to_users(message):
     subscribers = load_subscribers()
     for chat_id in subscribers:
@@ -58,102 +64,100 @@ async def broadcast_to_users(message):
                 disable_notification=True,
             )
         except TelegramError as e:
-            logging.error(f"Error sending message to chat {1355080202}: {e}")
+            logger.error(f"Error sending message to chat {chat_id}: {e}")
 
 
-# Function to handle BTC WebSocket messages
-def on_message_btc(ws, message):
-    global BTC_ATH
+def calculate_twap(symbol):
+    if len(price_history[symbol]) == 0:
+        return None
+    return sum(price for price, _ in price_history[symbol]) / len(price_history[symbol])
+
+
+def update_price_history(symbol, price):
+    current_time = datetime.now()
+    price_history[symbol].append((price, current_time))
+    price_history[symbol] = [
+        (p, t)
+        for p, t in price_history[symbol]
+        if current_time - t <= timedelta(seconds=TWAP_WINDOW)
+    ]
+
+
+def check_and_update_ath(symbol, current_price):
+    global ath_values, last_notification_time, notification_count, notification_reset_time
+
+    current_time = datetime.now()
+    twap = calculate_twap(symbol)
+
+    if twap is None:
+        return
+
+    if twap > ath_values.get(symbol, 0) * (1 + PERCENTAGE_THRESHOLD / 100):
+        if (
+            current_time - last_notification_time[symbol]
+        ).total_seconds() > COOLDOWN_PERIOD:
+            if current_time - notification_reset_time[symbol] > timedelta(hours=1):
+                notification_count[symbol] = 0
+                notification_reset_time[symbol] = current_time
+
+            if notification_count[symbol] < MAX_NOTIFICATIONS_PER_HOUR:
+                ath_values[symbol] = twap
+                save_ath_values(ath_values)
+                asyncio.run(
+                    broadcast_to_users(
+                        f"🎉 New All-Time High for {symbol[:-4]}: ${twap:.2f}!"
+                    )
+                )
+                last_notification_time[symbol] = current_time
+                notification_count[symbol] += 1
+
+
+def on_message(ws, message):
     data = json.loads(message)
-    if data["s"] == "BTCUSDT":
-        current_btc_price = float(data["p"])
-        print(f"Current BTC price is: {current_btc_price}")
-        if current_btc_price > BTC_ATH:
-            BTC_ATH = current_btc_price
-            ath_values["BTC"] = BTC_ATH
-            save_ath_values(ath_values)
-            asyncio.run(
-                broadcast_to_users(f"🎉 New All-Time High for BTC: ${BTC_ATH}!")
-            )
-    time.sleep(10)
+    symbol = data["s"]
+    current_price = float(data["p"])
+    logger.info(f"Received price for {symbol}: ${current_price}")
+    update_price_history(symbol, current_price)
+    check_and_update_ath(symbol, current_price)
 
 
-# Function to handle ETH WebSocket messages
-def on_message_eth(ws, message):
-    global ETH_ATH
-    data = json.loads(message)
-    if data["s"] == "ETHUSDT":
-        current_eth_price = float(data["p"])
-        print(f"Current ETH price is: {current_eth_price}")
-        if current_eth_price > ETH_ATH:
-            ETH_ATH = current_eth_price
-            ath_values["ETH"] = ETH_ATH
-            save_ath_values(ath_values)
-            asyncio.run(
-                broadcast_to_users(f"🎉 New All-Time High for ETH: ${ETH_ATH}!")
-            )
-    time.sleep(10)
-
-
-# Function to handle WebSocket errors
 def on_error(ws, error):
-    print("WebSocket error:", error)
+    logger.error(f"WebSocket error: {error}")
 
 
-# Function to handle WebSocket closure
 def on_close(ws, close_status_code, close_msg):
-    print("WebSocket closed with code:", close_status_code, ", message:", close_msg)
-
-
-# Function to handle WebSocket opening
-def on_open(ws):
-    print("WebSocket connection opened")
-
-
-# Start WebSocket connection with reconnection handling for BTC
-def start_btc_websocket():
-    while True:
-        try:
-            ws = websocket.WebSocketApp(
-                "wss://stream.binance.com:9443/ws/btcusdt@trade",
-                on_message=on_message_btc,
-                on_error=on_error,
-                on_close=on_close,
-                on_open=on_open,
-            )
-            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE, "check_hostname": False})
-        except Exception as e:
-            print("Exception occurred:", e)
-        time.sleep(60)
-        print("Reconnecting to BTC WebSocket...")
-
-
-# Start WebSocket connection with reconnection handling for ETH
-def start_eth_websocket():
-    while True:
-        try:
-            ws = websocket.WebSocketApp(
-                "wss://stream.binance.com:9443/ws/ethusdt@trade",
-                on_message=on_message_eth,
-                on_error=on_error,
-                on_close=on_close,
-                on_open=on_open,
-            )
-            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE, "check_hostname": False})
-        except Exception as e:
-            print("Exception occurred:", e)
-        time.sleep(60)
-        print("Reconnecting to ETH WebSocket...")
-
-
-# Async function to run both WebSocket connections concurrently
-async def run_websockets():
-    # Run both WebSocket connections concurrently
-    await asyncio.gather(
-        asyncio.to_thread(start_btc_websocket), asyncio.to_thread(start_eth_websocket)
+    logger.info(
+        f"WebSocket closed with code: {close_status_code}, message: {close_msg}"
     )
 
 
-# Start monitoring
+def on_open(ws):
+    logger.info("WebSocket connection opened")
+    # Subscribe to the streams
+    subscribe_message = {
+        "method": "SUBSCRIBE",
+        "params": ["btcusdt@trade", "ethusdt@trade"],
+        "id": 1,
+    }
+    ws.send(json.dumps(subscribe_message))
+
+
+def start_websocket():
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                "wss://stream.binance.com:9443/ws",
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+                on_open=on_open,
+            )
+            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE, "check_hostname": False})
+        except Exception as e:
+            logger.error(f"Exception occurred: {e}")
+        time.sleep(60)
+        logger.info("Reconnecting to WebSocket...")
+
+
 if __name__ == "__main__":
-    asyncio.run(run_websockets())
+    start_websocket()
