@@ -15,7 +15,8 @@ This project is a crypto-related Telegram bot that provides real-time market dat
 The bot allows Telegram users to receive real-time updates on BTC/ETH prices and the Fear and Greed index.
 
 The update looks as follows:
-![Image Showcase](<CleanShot 2024-11-10 at 15.09.03@2x.png>)
+
+![Image Showcase](ressources/images/Update.png)
 
 Users can also subscribe to receive automatic updates twice a day.
 
@@ -32,7 +33,7 @@ Finally, this feature is using simple API calls to different providers:
 
 The bot will also display a message when a new ATH is reached for BTC or ETH. This message will be sent only to people that subscribed for automatic updates.
 
-![alt text](<CleanShot 2024-11-10 at 13.46.59@2x.png>)
+![alt text](ressources/images/ATH.png)
 
 This feature is using a websocket connection _(Binance websocket)_ to monitor the price at all times
 
