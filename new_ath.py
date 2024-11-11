@@ -26,7 +26,7 @@ bot = Bot(token=token)
 # Constants
 COOLDOWN_PERIOD = 10  # In seconds
 PERCENTAGE_THRESHOLD = 0.1  # 0.1% increase for new ATH notification
-TWAP_WINDOW = 300  # 5 minutes for TWAP calculation
+TWAP_WINDOW = 20  # In seconds
 MAX_NOTIFICATIONS_PER_HOUR = 3
 
 # Global variables
@@ -103,6 +103,9 @@ def check_and_update_ath(symbol, current_price):
             if notification_count[symbol] < MAX_NOTIFICATIONS_PER_HOUR:
                 ath_values[symbol] = twap
                 save_ath_values(ath_values)
+                logger.info(
+                    f"New ATH for {symbol[:-4]} at ${twap:.2f} , sending message"
+                )
                 asyncio.run(
                     broadcast_to_users(
                         f"🎉 New All-Time High for {symbol[:-4]}: ${twap:.2f}!"
@@ -116,7 +119,7 @@ def on_message(ws, message):
     data = json.loads(message)
     symbol = data["s"]
     current_price = float(data["p"])
-    logger.info(f"Received price for {symbol}: ${current_price}")
+    print(f"Received price for {symbol}: ${current_price}")
     update_price_history(symbol, current_price)
     check_and_update_ath(symbol, current_price)
 
