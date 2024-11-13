@@ -3,13 +3,14 @@ import json
 import logging
 import os
 import ssl
-import time
+import threading
 from datetime import datetime, timedelta
 
 import websocket
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.error import TelegramError
+from telegram.request import HTTPXRequest
 
 from main import load_subscribers
 
@@ -21,20 +22,19 @@ logger = logging.getLogger(__name__)
 
 # Initialize the Telegram Bot
 token = os.getenv("TOKEN_BOT")
-bot = Bot(token=token)
+
+trequest = HTTPXRequest(connection_pool_size=20)
+bot = Bot(token=token, request=trequest)
 
 # Constants
 COOLDOWN_PERIOD = 10  # In seconds
 PERCENTAGE_THRESHOLD = 0.1  # 0.1% increase for new ATH notification
-TWAP_WINDOW = 20  # In seconds
-MAX_NOTIFICATIONS_PER_HOUR = 3
+TWAP_WINDOW = 2  # In seconds
 
 # Global variables
 ath_values = {}
 last_notification_time = {"BTCUSDT": datetime.min, "ETHUSDT": datetime.min}
 price_history = {"BTCUSDT": [], "ETHUSDT": []}
-notification_count = {"BTCUSDT": 0, "ETHUSDT": 0}
-notification_reset_time = {"BTCUSDT": datetime.now(), "ETHUSDT": datetime.now()}
 
 
 def load_ath_values():
@@ -54,17 +54,22 @@ ath_values = load_ath_values()
 
 
 async def broadcast_to_users(message):
-    subscribers = load_subscribers()
-    for chat_id in subscribers:
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-        except TelegramError as e:
-            logger.error(f"Error sending message to chat {chat_id}: {e}")
+    try:
+        subscribers = load_subscribers()
+        for chat_id in subscribers:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_notification=True,
+                )
+                await asyncio.sleep(0.1)
+            except TelegramError as e:
+                logger.error(f"Error sending message to chat {chat_id}: {e}")
+    except Exception as e:
+        # Log the error or handle it accordingly
+        print(f"Error broadcasting to users: {e}")
 
 
 def calculate_twap(symbol):
@@ -83,8 +88,8 @@ def update_price_history(symbol, price):
     ]
 
 
-def check_and_update_ath(symbol, current_price):
-    global ath_values, last_notification_time, notification_count, notification_reset_time
+async def check_and_update_ath(symbol, current_price):
+    global ath_values, last_notification_time
 
     current_time = datetime.now()
     twap = calculate_twap(symbol)
@@ -96,32 +101,26 @@ def check_and_update_ath(symbol, current_price):
         if (
             current_time - last_notification_time[symbol]
         ).total_seconds() > COOLDOWN_PERIOD:
-            if current_time - notification_reset_time[symbol] > timedelta(hours=1):
-                notification_count[symbol] = 0
-                notification_reset_time[symbol] = current_time
-
-            if notification_count[symbol] < MAX_NOTIFICATIONS_PER_HOUR:
-                ath_values[symbol] = twap
-                save_ath_values(ath_values)
-                logger.info(
-                    f"New ATH for {symbol[:-4]} at ${twap:.2f} , sending message"
-                )
-                asyncio.run(
-                    broadcast_to_users(
-                        f"🎉 New All-Time High for {symbol[:-4]}: ${twap:.2f}!"
-                    )
-                )
-                last_notification_time[symbol] = current_time
-                notification_count[symbol] += 1
+            ath_values[symbol] = twap
+            save_ath_values(ath_values)
+            logger.info(f"New ATH for {symbol[:-4]} at ${twap:.2f} , sending message")
+            await broadcast_to_users(
+                f"🎉 New All-Time High for {symbol[:-4]}: ${twap:.2f}!"
+            )
+            last_notification_time[symbol] = current_time
 
 
-def on_message(ws, message):
+async def handle_websocket_message(message):
     data = json.loads(message)
     symbol = data["s"]
     current_price = float(data["p"])
     print(f"Received price for {symbol}: ${current_price}")
     update_price_history(symbol, current_price)
-    check_and_update_ath(symbol, current_price)
+    await check_and_update_ath(symbol, current_price)
+
+
+def on_message(ws, message):
+    asyncio.run(handle_websocket_message(message))
 
 
 def on_error(ws, error):
@@ -130,13 +129,12 @@ def on_error(ws, error):
 
 def on_close(ws, close_status_code, close_msg):
     logger.info(
-        f"WebSocket closed with code: {close_status_code}, message: {close_msg}"
+        f"WebSocket connection closed with code: {close_status_code}, message: {close_msg}"
     )
 
 
 def on_open(ws):
     logger.info("WebSocket connection opened")
-    # Subscribe to the streams
     subscribe_message = {
         "method": "SUBSCRIBE",
         "params": ["btcusdt@trade", "ethusdt@trade"],
@@ -145,7 +143,7 @@ def on_open(ws):
     ws.send(json.dumps(subscribe_message))
 
 
-def start_websocket():
+async def websocket_loop():
     while True:
         try:
             ws = websocket.WebSocketApp(
@@ -155,12 +153,30 @@ def start_websocket():
                 on_close=on_close,
                 on_open=on_open,
             )
-            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE, "check_hostname": False})
+            wst = threading.Thread(
+                target=ws.run_forever,
+                kwargs={
+                    "sslopt": {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+                },
+            )
+            wst.daemon = True
+            wst.start()
+
+            # Keep the main loop running
+            while wst.is_alive():
+                await asyncio.sleep(1)
+
         except Exception as e:
             logger.error(f"Exception occurred: {e}")
-        time.sleep(60)
+
         logger.info("Reconnecting to WebSocket...")
+        await asyncio.sleep(5)
+
+
+async def main():
+    websocket_task = asyncio.create_task(websocket_loop())
+    await websocket_task
 
 
 if __name__ == "__main__":
-    start_websocket()
+    asyncio.run(main())
